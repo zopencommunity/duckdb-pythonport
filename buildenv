@@ -1,0 +1,224 @@
+# bump: duckdb-python-version /DUCKDB_PYTHON_VERSION="(.*)"/ https://github.com/duckdb/duckdb-python.git|semver:*
+DUCKDB_PYTHON_VERSION="1.5.4"
+
+###
+### Build control file for the duckdb-python port
+###
+
+###
+### Required Environment Variables
+###
+export ZOPEN_PROJECT_NAME="duckdb-python"
+export ZOPEN_BUILD_LINE="STABLE"
+export ZOPEN_STABLE_URL="https://github.com/duckdb/duckdb-python.git"
+export ZOPEN_STABLE_TAG="v1.5.4"
+export ZOPEN_STABLE_DEPS="check_python cmake grep ninja"
+export ZOPEN_DEV_URL="https://github.com/duckdb/duckdb-python.git"
+export ZOPEN_DEV_DEPS="check_python cmake grep ninja"
+export ZOPEN_CATEGORIES="database development library"
+export ZOPEN_RUNTIME_DEPS="check_python"
+export ZOPEN_CLONE_SUBMODULES="yes"
+# export ZOPEN_SYSTEM_PREREQ="zos25" # optional system pre-req (default=zos25)
+
+
+###
+### Build settings (Port type: BUILD, Build system: Python)
+###
+### Settings for Python build system (with C extensions)
+### Build, check, install, and env are handled natively by zopen-build
+export ZOPEN_BUILD_SYSTEM="Python"
+export ZOPEN_MAKE="zopen_custom_build"
+export ZOPEN_CHECK="zopen_custom_check"
+export ZOPEN_EXTRA_CPPFLAGS="${ZOPEN_EXTRA_CPPFLAGS} -D_XPLATFORM_SOURCE=1"
+export ZOPEN_EXTRA_CFLAGS="${ZOPEN_EXTRA_CFLAGS} -mzos-target=zosv3r1 -fvisibility=default"
+export ZOPEN_EXTRA_CXXFLAGS="${ZOPEN_EXTRA_CXXFLAGS} -mzos-target=zosv3r1 -fvisibility=default"
+
+
+###
+### Required user-supplied functions
+###
+
+# zopen_check_results is provided natively by zopen-build for Python
+
+zopen_get_version() {
+  echo "$DUCKDB_PYTHON_VERSION"
+}
+
+
+###
+### Custom Build Logic (if applicable)
+###
+
+zopen_init() {
+  # Apply small z/OS fixes to the checked-out source tree. The DuckDB source is
+  # a git submodule, so keep these edits here instead of relying on root-level
+  # git patches that cannot modify submodule contents reliably.
+  python - <<'PY'
+from pathlib import Path
+
+loader = Path('cmake/duckdb_loader.cmake')
+text = loader.read_text()
+old = '''  target_link_libraries(
+    ${target_name}
+    PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,duckdb_generated_extension_loader>")'''
+new = '''  if(CMAKE_SYSTEM_NAME STREQUAL "OS390")
+    target_link_libraries(${target_name} PRIVATE duckdb_generated_extension_loader)
+  else()
+    target_link_libraries(
+      ${target_name}
+      PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,duckdb_generated_extension_loader>")
+  endif()'''
+if old in text:
+    loader.write_text(text.replace(old, new, 1))
+
+block_allocator = Path('external/duckdb/src/storage/block_allocator.cpp')
+text = block_allocator.read_text()
+old = '''#ifdef __MVS__
+#include <zos-tls.h>
+#endif'''
+new = '''#ifdef __MVS__
+#include <zos-tls.h>
+#ifndef MAP_ANONYMOUS
+#define MAP_ANONYMOUS 32
+#endif
+#endif'''
+if old in text:
+    block_allocator.write_text(text.replace(old, new, 1))
+PY
+
+  # Python extension builds ignore LIBS on some build backends; ensure zoslib and
+  # other dependency libraries are available during extension linking.
+  python_libdir=$(python - <<'PY'
+import sysconfig
+print(sysconfig.get_config_var('LIBDIR') or '')
+PY
+)
+  # z/OS Python extension modules must explicitly link against Python's side deck.
+  export LDFLAGS="$LDFLAGS $LIBS ${python_libdir}/libpython3.12.x"
+}
+
+zopen_custom_build() {
+  if [ ! -f ".venv/bin/activate" ]; then
+    python -m venv .venv
+  fi
+  . .venv/bin/activate
+  pip install setuptools build installer wheel scikit-build-core 'pybind11[global]>=2.6.0' 'setuptools_scm>=8.0'
+  rm -rf dist
+  export OVERRIDE_GIT_DESCRIBE="v${DUCKDB_PYTHON_VERSION}"
+  # Use zopen-provided cmake/ninja from PATH. Skip Python build's dependency
+  # check so it does not try to build the PyPI cmake package from source.
+  python -m build --wheel --no-isolation --skip-dependency-check
+  zopen_custom_build_rc=$?
+  deactivate
+  return ${zopen_custom_build_rc}
+}
+
+zopen_custom_check() {
+  . .venv/bin/activate
+  pip install --force-reinstall --no-deps dist/*.whl
+  python - <<'PY'
+import duckdb
+
+checks = [
+    ("version", lambda: isinstance(duckdb.__version__, str) and duckdb.__version__),
+    ("simple_select", lambda: duckdb.sql("select 42").fetchone()[0] == 42),
+    ("aggregation", lambda: duckdb.sql("select sum(i) from range(5) t(i)").fetchone()[0] == 10),
+    ("json_extension", lambda: duckdb.sql("select json('{\"a\":1}')").fetchone()[0] == '{"a":1}'),
+    ("connection", lambda: duckdb.connect(':memory:').execute('select 1').fetchone()[0] == 1),
+]
+
+failures = 0
+for name, check in checks:
+    try:
+        ok = bool(check())
+    except Exception as exc:
+        ok = False
+        print(f"FAILED {name}: {exc}")
+    if ok:
+        print(f"PASSED {name}")
+    else:
+        print(f"FAILED {name}")
+        failures += 1
+
+print(f"DUCKDB_SMOKE_TOTAL={len(checks)}")
+print(f"DUCKDB_SMOKE_FAILURES={failures}")
+raise SystemExit(1 if failures else 0)
+PY
+  zopen_custom_check_rc=$?
+  deactivate
+  return ${zopen_custom_check_rc}
+}
+
+zopen_check_results() {
+  dir="$1"
+  pfx="$2"
+  chk="$1/$2_check.log"
+  totalTests=$(grep -oE 'DUCKDB_SMOKE_TOTAL=[0-9]+' "${chk}" | tail -1 | cut -d= -f2)
+  actualFailures=$(grep -oE 'DUCKDB_SMOKE_FAILURES=[0-9]+' "${chk}" | tail -1 | cut -d= -f2)
+  echo "actualFailures:${actualFailures:-1}"
+  echo "totalTests:${totalTests:-0}"
+  echo "expectedFailures:0"
+}
+
+
+###
+### Optional User-Supplied Hooks (uncomment to use)
+###
+
+#zopen_append_to_env() {
+#  ## This function runs as part of generation of the .env file. The output of the
+#  ## function is appended to .env.
+#}
+#
+#zopen_append_to_setup(){
+#  ## This function runs as part of generation of the setup.sh file. The output of
+#  ## the function is appended to setup.sh.
+#}
+#
+#zopen_append_to_validate_install(){
+#  ## This function runs as part of generation of the install_test.sh file. The
+#  ## output of the function is appended to install_test.sh script.
+#}
+#
+#zopen_install_caveats(){
+#  ## This function is run post install. All stdout messages are captured and
+#  ## added to the metadata.json as installation caveats.
+#}
+#
+#zopen_init(){
+#  ## This function runs after code is downloaded and patched but before the code
+#  ## is built.
+#}
+#
+#zopen_post_buildenv(){
+#  ## This function runs after the 'buildenv' is processed.
+#}
+#
+#zopen_pre_build(){
+#  ## This function runs before the 'make' step of the build is run.
+#}
+#
+#zopen_pre_check(){
+#  ## This function runs before the 'check' step of the build is run.
+#}
+#
+#zopen_pre_configure(){
+#  ## This function runs before the 'configure' step of the build is run.
+#}
+#
+#zopen_pre_install(){
+#  ## This function runs before the 'install' step of the build is run.
+#}
+#
+#zopen_post_install(){
+#  ## This function runs after the 'install' step of the build is run.
+#}
+#
+#zopen_pre_patch(){
+#  ## This function runs before the 'patch' step of the build is run.
+#}
+#
+#zopen_pre_terminate(){
+#  ## This function runs before 'zopen build' terminates.
+#}
+
