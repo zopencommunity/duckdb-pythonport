@@ -1,5 +1,5 @@
 # bump: duckdb-python-version /DUCKDB_PYTHON_VERSION="(.*)"/ https://github.com/duckdb/duckdb-python.git|semver:*
-DUCKDB_PYTHON_VERSION="1.5.4"
+DUCKDB_PYTHON_VERSION="1.5.5"
 
 ###
 ### Build control file for the duckdb-python port
