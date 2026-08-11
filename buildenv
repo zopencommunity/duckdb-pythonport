@@ -11,7 +11,10 @@ DUCKDB_PYTHON_VERSION="1.5.5"
 export ZOPEN_PROJECT_NAME="duckdb-python"
 export ZOPEN_BUILD_LINE="STABLE"
 export ZOPEN_STABLE_URL="https://github.com/duckdb/duckdb-python.git"
-export ZOPEN_STABLE_TAG="v1.5.4"
+# Follow the version variable rather than a literal, so the bump bot
+# updating DUCKDB_PYTHON_VERSION actually changes what gets built. A hardcoded
+# tag drifts: the port then builds one version while reporting another.
+export ZOPEN_STABLE_TAG="v${DUCKDB_PYTHON_VERSION}"
 export ZOPEN_STABLE_DEPS="check_python cmake grep ninja"
 export ZOPEN_DEV_URL="https://github.com/duckdb/duckdb-python.git"
 export ZOPEN_DEV_DEPS="check_python cmake grep ninja"
